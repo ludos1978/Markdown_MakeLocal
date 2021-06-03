@@ -1,19 +1,12 @@
+import os, sys, re
 import requests
 import uuid
-import re
-import os
-import urllib
-import filecmp
-import sys
 import hashlib
 import markdown
 import mimetypes
-from urllib.parse import urlparse
-from mimetypes import guess_extension
-from time import time
-from multiprocessing import Pool, TimeoutError
-from threading import Thread
-from lxml import etree
+import threading
+import lxml.etree
+import urllib.parse
 
 
 ''' read the filetype from the header of a downloaded file using content-disposition, from content-type, or from the filename '''
@@ -29,10 +22,10 @@ def getFilenameFromHeaders (headers, url):
                 return filename
     
     # get filetype from headers
-    fileExtension = guess_extension(headers['content-type'].partition(';')[0].strip())
+    fileExtension = mimetypes.guess_extension(headers['content-type'].partition(';')[0].strip())
     
     # try to use the url as filename
-    urlPath = urlparse(url)
+    urlPath = urllib.parse.urlparse(url)
     filename = os.path.basename(urlPath.path)  # Output: 09-09-201315-47-571378756077.jpg
     urlFileOnlyName, urlFileExtension = os.path.splitext(filename)
     # if filename contains an extension
@@ -52,7 +45,7 @@ def getUrlsInMarkdown(pMarkdownFilename):
     with open(pMarkdownFilename, "r") as markdownFile:
         markdownFileContent = markdownFile.read()
         markdownFileAsMarkdown = bytes('<?xml version="1.0" encoding="utf8"?>\n<div>\n' + markdown.markdown(markdownFileContent) + '</div>\n', encoding='utf8')
-        doc = etree.fromstring(markdownFileAsMarkdown)
+        doc = lxml.etree.fromstring(markdownFileAsMarkdown)
         for link in doc.xpath('//img'):
             linkSrc = link.get('src')
             if (linkSrc.startswith('http')):
@@ -69,7 +62,7 @@ def replacemany(adict, astring):
 
 
 ''' threaded file downloading : generates filename, tries to prevent overwriting files by adding md5 sum to filename if file exists '''
-class Downloader(Thread):
+class Downloader(threading.Thread):
     def __init__(self, fileUrl, relativePath):
         super(Downloader, self).__init__()
         self.fileUrl = fileUrl
