@@ -71,8 +71,13 @@ class Downloader(threading.Thread):
         self.finalFilePath = self.fileUrl
 
     def run(self):
-        uniqueId = str(uuid.uuid4())
-        tempFilePath = os.path.join(self.relativePath, uniqueId)
+        # make sure the temp file path does not exist
+        while True:
+            uniqueId = str(uuid.uuid4())
+            tempFilePath = os.path.join(self.relativePath, uniqueId)
+            if (not os.path.exists(tempFilePath)):
+                break
+
         print ("download %s as %s" % (self.fileUrl, tempFilePath))
 
         request = requests.get(self.fileUrl, stream = True)
@@ -97,14 +102,16 @@ class Downloader(threading.Thread):
         except:
             print ("unable to guess mimetpe of %s / %s" % (self.fileUrl, filePath))
         
+        # check if we need to rename the file because we the file has the same name, but a different file content
         if os.path.exists(filePath):
             # check if the existing file has the same md5sig
             existingMd5sig = hashlib.md5()
             with open(filePath, 'rb') as existingFile:
                 for byte_block in iter(lambda: existingFile.read(4096),b""):
                     existingMd5sig.update(byte_block)
+            
             if (existingMd5sig.hexdigest() == md5sig.hexdigest()):
-                print ("md5sum of %s is equal, overwriting file" % filePath)
+                print ("md5sum of %s is equal, deleting downloaded file" % filePath)
             else:
                 fileName = fileTitle + "_" + md5sig.hexdigest() + fileExt
                 print ("existing file md5 %s differs from new file md5 %s" % (existingMd5sig.hexdigest(), md5sig.hexdigest()))
@@ -130,7 +137,6 @@ if __name__ == "__main__":
 
     markdownFilename = sys.argv[1]
     mediaTargetFolder = sys.argv[2]
-    markdownTempFilename = str(uuid.uuid4()) + ".md"
 
     if (not os.path.exists(markdownFilename)):
         print ("markdownFilename %s does not exist" % markdownFilename)
@@ -158,6 +164,12 @@ if __name__ == "__main__":
                 print ("saved %s as %s"% (thread.fileUrl, thread.finalFilePath))
                 replacements[thread.fileUrl] = thread.finalFilePath
 
+        # make sure we dont use a temp filename that already exists
+        while True:
+            markdownTempFilename = str(uuid.uuid4()) + ".md"
+            if (not os.path.exists(markdownTempFilename)):
+                break
+    
         print ("saving new temporary markdownfile with replaced links as %s" % markdownTempFilename)
         with open(markdownTempFilename, 'w') as fin:
             with open(markdownFilename, 'r') as ini:
