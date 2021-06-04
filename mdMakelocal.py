@@ -1,5 +1,7 @@
 import os, sys, re
 import requests
+import glob
+import argparse
 import uuid
 import hashlib
 import markdown
@@ -8,9 +10,38 @@ import threading
 import lxml.etree
 import urllib.parse
 
+class _Getch:
+    """Gets a single character from standard input.  Does not echo to the
+screen."""
+    def __init__(self):
+        try:
+            self.impl = _GetchWindows()
+        except ImportError:
+            self.impl = _GetchUnix()
+    def __call__(self): return self.impl()
+class _GetchUnix:
+    def __init__(self):
+        import tty, sys
+    def __call__(self):
+        import sys, tty, termios
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            ch = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        return ch
+class _GetchWindows:
+    def __init__(self):
+        import msvcrt
+    def __call__(self):
+        import msvcrt
+        return msvcrt.getch()
+getch = _Getch()
 
-''' read the filetype from the header of a downloaded file using content-disposition, from content-type, or from the filename '''
 def getFilenameFromHeaders (headers, url):
+    """ read the filetype from the header of a downloaded file using content-disposition, from content-type, or from the filename """
     # try to use the content-displisiton filename
     contentDisposition = headers.get('content-disposition')
     if contentDisposition:
@@ -39,8 +70,8 @@ def getFilenameFromHeaders (headers, url):
     # use a random id
     return uuid.uuid4() + fileExtension
 
-''' get a list of all urls referenced as <img> in a markdown file '''
 def getUrlsInMarkdown(pMarkdownFilename):
+    """ get a list of all urls referenced as <img> in a markdown file """
     urls = []
     with open(pMarkdownFilename, "r") as markdownFile:
         markdownFileContent = markdownFile.read()
@@ -53,16 +84,16 @@ def getUrlsInMarkdown(pMarkdownFilename):
     return urls
 
 
-''' replace multiple keys with values from adic in astring '''
 def replacemany(adict, astring):
+    """ replace multiple keys with values from adic in astring """
     pat = '|'.join(re.escape(s) for s in adict)
     there = re.compile(pat)
     def onerepl(mo): return adict[mo.group()]
     return there.sub(onerepl, astring)
 
 
-''' threaded file downloading : generates filename, tries to prevent overwriting files by adding md5 sum to filename if file exists '''
 class Downloader(threading.Thread):
+    """ threaded file downloading : generates filename, tries to prevent overwriting files by adding md5 sum to filename if file exists """
     def __init__(self, fileUrl, relativePath):
         super(Downloader, self).__init__()
         self.fileUrl = fileUrl
@@ -131,57 +162,85 @@ class Downloader(threading.Thread):
 
 if __name__ == "__main__":
 
-    if (len(sys.argv) < 2):
-        print ("usage: python3 %s markdownFile.md ./MediaTargetFolder" % (sys.argv[0]))
-        sys.exit()
+    # if (len(sys.argv) < 2):
+    #     print ("usage: python3 %s markdownFile.md ./MediaTargetFolder" % (sys.argv[0]))
+    #     sys.exit()
 
-    markdownFilename = sys.argv[1]
-    mediaTargetFolder = sys.argv[2]
+    parser = argparse.ArgumentParser(
+        description='Download linked images in Markdown File and generate new MD',
+        usage='%(prog)s file.md [file2.md ..] [-m Folder]')
+    # parser.add_argument('filename', type=str, nargs='+', help='markdown file[s]')
+    parser.add_argument('path', nargs='+', help='Path of a file or a folder of files.')
+    parser.add_argument("-m", "--media", help='specify folder for media downloads', required=False, default="./Media")
+    args = parser.parse_args()
 
-    if (not os.path.exists(markdownFilename)):
-        print ("markdownFilename %s does not exist" % markdownFilename)
-        sys.exit()
+    # read list of markdown files
+    full_paths = [os.path.normpath(os.path.join(os.getcwd(), path)) for path in args.path]
+    markdownFiles = set()
+    for path in full_paths:
+        if os.path.isfile(path):
+            markdownFiles.add(path)
+        else:
+            markdownFiles |= set(glob.glob(path + '/*' + '.md'))
 
+    # read media folder
+    mediaTargetFolder = args.media
+
+    # check media folder exists
     if (not os.path.isdir(mediaTargetFolder)):
-        print ("MediaTargetFolder %s does not exist" % mediaTargetFolder)
+        print ("Media folder %s does not exist" % mediaTargetFolder)
         sys.exit()
 
-    urlsInMarkDownFile = getUrlsInMarkdown(markdownFilename)
-    if (len(urlsInMarkDownFile) == 0):
-        print ("no downloadable urls found in %s" % markdownFilename)
-    else:
-        threads = []
-        for i in range(len(urlsInMarkDownFile)):
-            thread = Downloader(urlsInMarkDownFile[i], mediaTargetFolder)
-            thread.start()
-            threads.append(thread)
-        
-        replacements = {}
-        for thread in threads:
-            thread.join()
-            # only if path has changed (othervise it has been skipped or deleted)
-            if (thread.fileUrl != thread.finalFilePath):
-                print ("saved %s as %s"% (thread.fileUrl, thread.finalFilePath))
-                replacements[thread.fileUrl] = thread.finalFilePath
+    print ("detected markdown files")
+    for filename in markdownFiles:
+        print ("  %s" % filename)
+    yna = ""
+    while (yna not in ["y","n"]):
+        print ("handle all these files? y(es) / n(o)")
+        yna = getch().lower()
+        if (yna == "n"):
+            print ("aborted")
+            sys.exit()
 
-        # make sure we dont use a temp filename that already exists
-        while True:
-            markdownTempFilename = str(uuid.uuid4()) + ".md"
-            if (not os.path.exists(markdownTempFilename)):
-                break
-    
-        print ("saving new temporary markdownfile with replaced links as %s" % markdownTempFilename)
-        with open(markdownTempFilename, 'w') as fin:
-            with open(markdownFilename, 'r') as ini:
-                fin.write(replacemany(replacements, ini.read()))
-        
-        markdownFileTitle, markdownFileExt = os.path.splitext(markdownFilename)
-        # rename markdownTempFilename to markdownFilename-localMedia-X.md which does not exists
-        newMarkdownFilename = "%s-localMedia.md" % markdownFileTitle
-        newMarkdownFilenameIndex = 0
-        while (os.path.exists(newMarkdownFilename)):
-            newMarkdownFilenameIndex += 1
-            newMarkdownFilename = "%s-localMedia-%i.md" % (markdownFileTitle, newMarkdownFilenameIndex)
+    # iterate all markdown files
+    for markdownFilename in markdownFiles:
+        print ("parsing %s" % markdownFilename)
+        urlsInMarkDownFile = getUrlsInMarkdown(markdownFilename)
+        if (len(urlsInMarkDownFile) == 0):
+            print ("no downloadable urls found in %s" % markdownFilename)
+        else:
+            threads = []
+            for i in range(len(urlsInMarkDownFile)):
+                thread = Downloader(urlsInMarkDownFile[i], mediaTargetFolder)
+                thread.start()
+                threads.append(thread)
+            
+            replacements = {}
+            for thread in threads:
+                thread.join()
+                # only if path has changed (othervise it has been skipped or deleted)
+                if (thread.fileUrl != thread.finalFilePath):
+                    print ("saved %s as %s"% (thread.fileUrl, thread.finalFilePath))
+                    replacements[thread.fileUrl] = thread.finalFilePath
 
-        print ("rename temporary markdownfile %s as %s" % (markdownTempFilename, newMarkdownFilename))
-        os.rename(markdownTempFilename, newMarkdownFilename)
+            # make sure we dont use a temp filename that already exists
+            while True:
+                markdownTempFilename = str(uuid.uuid4()) + ".md"
+                if (not os.path.exists(markdownTempFilename)):
+                    break
+        
+            print ("saving new temporary markdownfile with replaced links as %s" % markdownTempFilename)
+            with open(markdownTempFilename, 'w') as fin:
+                with open(markdownFilename, 'r') as ini:
+                    fin.write(replacemany(replacements, ini.read()))
+            
+            markdownFileTitle, markdownFileExt = os.path.splitext(markdownFilename)
+            # rename markdownTempFilename to markdownFilename-localMedia-X.md which does not exists
+            newMarkdownFilename = "%s-localMedia.md" % markdownFileTitle
+            newMarkdownFilenameIndex = 0
+            while (os.path.exists(newMarkdownFilename)):
+                newMarkdownFilenameIndex += 1
+                newMarkdownFilename = "%s-localMedia-%i.md" % (markdownFileTitle, newMarkdownFilenameIndex)
+
+            print ("rename temporary markdownfile %s as %s" % (markdownTempFilename, newMarkdownFilename))
+            os.rename(markdownTempFilename, newMarkdownFilename)

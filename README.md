@@ -4,20 +4,24 @@ Analyze a Markdown file for Image URLs, download these files and generate a new 
 Has only been tested on OSX!
 
 ## Usage
-> python3 ./mdMakelocal.py markdownfile.md ./MediaFolder
+call the script with markdown file as parameter and optionally a folder (-m) where to save the Media
+will keep only images that are downloaded and generates a new markdown file with replaced links
+
+`python3 mdMakelocal.py file.md [file2.md ..] [-m Folder]`
 
 ## Requirements
 - python3
 
 with the libraries
 - requests
+- glob
 - uuid
 - hashlib
 - markdown
 - mimetypes
 - threading
-- lxml.etree
-- urllib.parse
+- lxml
+- urllib
 
 ## Things Considered in Development
 - If the filename already exists in the media folder, it will append the files md5 hash to the filename
