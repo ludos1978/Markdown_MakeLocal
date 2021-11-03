@@ -93,13 +93,7 @@ def getUrlsInMarkdown(pMarkdownFilename):
             if linkSrc.endswith('pdf'):
                 # insert _if (direct download of pdf's)
                 if linkSrc.startswith("https://web.archive.org/"):
-                    if ("/http://" in linkSrc):
-                        newLinkSrc = "if_/http://".join(linkSrc.split("/http://"))
-                        urls.append(newLinkSrc)
-                    else:
-                        newLinkSrc = "if_/https://".join(linkSrc.split("/https://"))
-                        urls.append(newLinkSrc)
-                    # print ("rewrite %s to %s" % (linkSrc, newLinkSrc))
+                    urls.append(linkSrc)
     return urls
 
 
@@ -115,10 +109,22 @@ class Downloader(threading.Thread):
     """ threaded file downloading : generates filename, tries to prevent overwriting files by adding md5 sum to filename if file exists """
     def __init__(self, fileUrl, relativePath, keepAllFiles):
         super(Downloader, self).__init__()
+        
+        # the text in the markdown file
         self.fileUrl = fileUrl
+        # the file to download
+        self.downloadUrl = fileUrl
+        if ("/http://" in fileUrl):
+            self.downloadUrl = "if_/http://".join(fileUrl.split("/http://"))
+        else:
+            self.downloadUrl = "if_/https://".join(fileUrl.split("/https://"))
+
+        # the new filename
+        self.finalFilePath = self.fileUrl
+
         self.relativePath = relativePath
         # by default leave the original path intact
-        self.finalFilePath = self.fileUrl
+        self.fileTitle = "undefined"
         self.keepAllFiles = keepAllFiles
         self.finished = False
 
@@ -130,19 +136,21 @@ class Downloader(threading.Thread):
             if (not os.path.exists(tempFilePath)):
                 break
 
-        print ("download %s as %s" % (self.fileUrl, tempFilePath))
+        print ("starting download %s as %s " % (self.downloadUrl, tempFilePath))
 
-        request = requests.get(self.fileUrl, stream = True)
+        response = requests.head(self.downloadUrl)
+        fileName = getFilenameFromHeaders(response.headers, self.downloadUrl)
+        fileTitle, fileExt = os.path.splitext(fileName)
+        self.fileTitle = fileTitle
+        filePath = os.path.join(self.relativePath, fileName)
+
+        request = requests.get(self.downloadUrl, stream = True)
         # https://stackoverflow.com/questions/14014854/python-on-the-fly-md5-as-one-reads-a-stream
         md5sig = hashlib.md5()
         with open(tempFilePath, 'wb') as file:
             for ch in request:
                 md5sig.update(ch)
                 file.write(ch)
-
-        fileName = getFilenameFromHeaders(request.headers, self.fileUrl)
-        fileTitle, fileExt = os.path.splitext(fileName)
-        filePath = os.path.join(self.relativePath, fileName)
 
         # try to check if file is image to download
         try:
@@ -164,11 +172,11 @@ class Downloader(threading.Thread):
                     existingMd5sig.update(byte_block)
             
             if (existingMd5sig.hexdigest() == md5sig.hexdigest()):
-                print ("md5sum of %s is equal, deleting downloaded file" % filePath)
+                print ("duplicate detected '%s' md5sum of is equal, deleting downloaded file" % filePath)
             else:
                 fileName = fileTitle + "_" + md5sig.hexdigest() + fileExt
-                print ("existing file md5 %s differs from new file md5 %s" % (existingMd5sig.hexdigest(), md5sig.hexdigest()))
-                print ("file '%s' already exists and md5 differs, using filename including md5sum as name '%s'" % (filePath, fileName))
+                # print ("existing file md5 %s differs from new file md5 %s" % (existingMd5sig.hexdigest(), md5sig.hexdigest()))
+                print ("name collision file '%s' already exists and md5 differs, using filename including md5sum as name '%s'" % (filePath, fileName))
                 filePath = os.path.join(self.relativePath, fileName)
 
         if os.path.exists(filePath):
@@ -177,6 +185,8 @@ class Downloader(threading.Thread):
         else:
             print ("saving file as %s" % filePath)
             os.rename(tempFilePath, filePath)
+
+        print ("finished download %s as %s" % (self.fileUrl, tempFilePath))
 
         self.finalFilePath = filePath
         self.finished = True
@@ -242,6 +252,7 @@ if __name__ == "__main__":
     for markdownFilename in markdownFiles:
         print ("parsing %s" % markdownFilename)
         urlsInMarkDownFile = getUrlsInMarkdown(markdownFilename)
+        urlsInMarkDownFile = list(set(urlsInMarkDownFile))
         if (len(urlsInMarkDownFile) == 0):
             print ("no downloadable urls found in %s" % markdownFilename)
         else:
@@ -251,19 +262,20 @@ if __name__ == "__main__":
                 for s in urlsInMarkDownFile:
                     print ("file %s" % s)
             else:
-                # while remaining files to download, or running download threads
+                # while remaining files to download, any running download threads
                 while ((len(urlsInMarkDownFile) > 0) or (len(runningThreads) > 0)):
-                    while (len(runningThreads) < maxThreads):
+                    # files remaining to download and not maximum number of threads running
+                    while (len(urlsInMarkDownFile) > 0) and (len(runningThreads) < maxThreads):
                         url = urlsInMarkDownFile.pop()
                         thread = Downloader(url, mediaTargetFolder, keepAllFiles)
                         thread.start()
                         runningThreads.append(thread)
 
-                    print ("threads: remaining %i running %i finished %i" % (len(urlsInMarkDownFile), len(runningThreads), len(finishedThreads)))
+                    print ("threads: remaining %i running %i finished %i (%s)" % (len(urlsInMarkDownFile), len(runningThreads), len(finishedThreads), ", ".join(i.fileTitle for i in runningThreads)))
                     time.sleep(1)
 
                     # check if thread finished, move to finishedthreads
-                    for i in range(len(runningThreads)-1, 0, -1):
+                    for i in range(len(runningThreads)-1, -1, -1):
                         if (runningThreads[i].finished):
                             thread = runningThreads.pop(i)
                             thread.join()
