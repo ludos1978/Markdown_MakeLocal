@@ -9,6 +9,7 @@ import mimetypes
 import threading
 import lxml.etree
 import urllib.parse
+import time
 
 class _Getch:
     """Gets a single character from standard input.  Does not echo to the
@@ -77,10 +78,28 @@ def getUrlsInMarkdown(pMarkdownFilename):
         markdownFileContent = markdownFile.read()
         markdownFileAsMarkdown = bytes('<?xml version="1.0" encoding="utf8"?>\n<div>\n' + markdown.markdown(markdownFileContent) + '</div>\n', encoding='utf8')
         doc = lxml.etree.fromstring(markdownFileAsMarkdown)
+        # print ("test")
+        # print (dir(doc))
+        # print (doc.items())
+        # include images
         for link in doc.xpath('//img'):
             linkSrc = link.get('src')
             if (linkSrc.startswith('http')):
                 urls.append(linkSrc)
+        # include pdf files from archive.org
+        for link in doc.xpath('//a'):
+            linkSrc = link.get('href')
+            # if (linkSrc.startswith('http') and linkSrc.endswith('pdf')):
+            if linkSrc.endswith('pdf'):
+                # insert _if (direct download of pdf's)
+                if linkSrc.startswith("https://web.archive.org/"):
+                    if ("/http://" in linkSrc):
+                        newLinkSrc = "if_/http://".join(linkSrc.split("/http://"))
+                        urls.append(newLinkSrc)
+                    else:
+                        newLinkSrc = "if_/https://".join(linkSrc.split("/https://"))
+                        urls.append(newLinkSrc)
+                    # print ("rewrite %s to %s" % (linkSrc, newLinkSrc))
     return urls
 
 
@@ -94,12 +113,14 @@ def replacemany(adict, astring):
 
 class Downloader(threading.Thread):
     """ threaded file downloading : generates filename, tries to prevent overwriting files by adding md5 sum to filename if file exists """
-    def __init__(self, fileUrl, relativePath):
+    def __init__(self, fileUrl, relativePath, keepAllFiles):
         super(Downloader, self).__init__()
         self.fileUrl = fileUrl
         self.relativePath = relativePath
         # by default leave the original path intact
         self.finalFilePath = self.fileUrl
+        self.keepAllFiles = keepAllFiles
+        self.finished = False
 
     def run(self):
         # make sure the temp file path does not exist
@@ -126,9 +147,10 @@ class Downloader(threading.Thread):
         # try to check if file is image to download
         try:
             fileMimetype = mimetypes.guess_type(fileName)[0]
-            if (fileMimetype.split("/")[0] != "image"):
+            if not ((fileMimetype.split("/")[0] in ["image"]) or (fileMimetype.split("/")[1] in ["pdf"])):
                 print ("unknown mimetpe %s of file %s / %s : removing file" % (str(fileMimetype), self.fileUrl, filePath) )
-                os.remove(tempFilePath)
+                if (self.keepAllFiles):
+                    os.remove(tempFilePath)
                 return
         except:
             print ("unable to guess mimetpe of %s / %s" % (self.fileUrl, filePath))
@@ -157,6 +179,7 @@ class Downloader(threading.Thread):
             os.rename(tempFilePath, filePath)
 
         self.finalFilePath = filePath
+        self.finished = True
 
 
 
@@ -172,6 +195,10 @@ if __name__ == "__main__":
     # parser.add_argument('filename', type=str, nargs='+', help='markdown file[s]')
     parser.add_argument('path', nargs='+', help='Path of a file or a folder of files.')
     parser.add_argument("-m", "--media", help='specify folder for media downloads', required=False, default="./Media")
+    #parser.add_argument("-d", "--dummy", type=bool, help='dummy run (dont download files)', required=False)
+    parser.add_argument("-d", "--dummy", dest="dummyRun", default=False, action="store_true", help='Do not do anything really')
+    parser.add_argument("--maxThreads", dest="maxThreads", default=5, help='maximum number of threads to download files')
+    parser.add_argument("-k", "--keep", dest="keepAllFiles", default=False, action="store_true", help='keep all downloaded files, or delete unknown types after download')
     args = parser.parse_args()
 
     # read list of markdown files
@@ -185,6 +212,15 @@ if __name__ == "__main__":
 
     # read media folder
     mediaTargetFolder = args.media
+    
+    # do a dummy run, not downloading or editing files
+    dummyRun = args.dummyRun
+
+    # maximum number of threads running to download files
+    maxThreads = max(args.maxThreads, 1)
+
+    # keep all files
+    keepAllFiles = args.keepAllFiles
 
     # check media folder exists
     if (not os.path.isdir(mediaTargetFolder)):
@@ -209,38 +245,61 @@ if __name__ == "__main__":
         if (len(urlsInMarkDownFile) == 0):
             print ("no downloadable urls found in %s" % markdownFilename)
         else:
-            threads = []
-            for i in range(len(urlsInMarkDownFile)):
-                thread = Downloader(urlsInMarkDownFile[i], mediaTargetFolder)
-                thread.start()
-                threads.append(thread)
-            
-            replacements = {}
-            for thread in threads:
-                thread.join()
-                # only if path has changed (othervise it has been skipped or deleted)
-                if (thread.fileUrl != thread.finalFilePath):
-                    print ("saved %s as %s"% (thread.fileUrl, thread.finalFilePath))
-                    replacements[thread.fileUrl] = thread.finalFilePath
+            runningThreads = []
+            finishedThreads = []
+            if (dummyRun):
+                for s in urlsInMarkDownFile:
+                    print ("file %s" % s)
+            else:
+                # while remaining files to download, or running download threads
+                while ((len(urlsInMarkDownFile) > 0) or (len(runningThreads) > 0)):
+                    while (len(runningThreads) < maxThreads):
+                        url = urlsInMarkDownFile.pop()
+                        thread = Downloader(url, mediaTargetFolder, keepAllFiles)
+                        thread.start()
+                        runningThreads.append(thread)
 
-            # make sure we dont use a temp filename that already exists
-            while True:
-                markdownTempFilename = str(uuid.uuid4()) + ".md"
-                if (not os.path.exists(markdownTempFilename)):
-                    break
-        
-            print ("saving new temporary markdownfile with replaced links as %s" % markdownTempFilename)
-            with open(markdownTempFilename, 'w') as fin:
-                with open(markdownFilename, 'r') as ini:
-                    fin.write(replacemany(replacements, ini.read()))
-            
-            markdownFileTitle, markdownFileExt = os.path.splitext(markdownFilename)
-            # rename markdownTempFilename to markdownFilename-localMedia-X.md which does not exists
-            newMarkdownFilename = "%s-localMedia.md" % markdownFileTitle
-            newMarkdownFilenameIndex = 0
-            while (os.path.exists(newMarkdownFilename)):
-                newMarkdownFilenameIndex += 1
-                newMarkdownFilename = "%s-localMedia-%i.md" % (markdownFileTitle, newMarkdownFilenameIndex)
+                    print ("threads: remaining %i running %i finished %i" % (len(urlsInMarkDownFile), len(runningThreads), len(finishedThreads)))
+                    time.sleep(1)
 
-            print ("rename temporary markdownfile %s as %s" % (markdownTempFilename, newMarkdownFilename))
-            os.rename(markdownTempFilename, newMarkdownFilename)
+                    # check if thread finished, move to finishedthreads
+                    for i in range(len(runningThreads)-1, 0, -1):
+                        if (runningThreads[i].finished):
+                            thread = runningThreads.pop(i)
+                            thread.join()
+                            finishedThreads.append(thread)
+
+                # for i in range(len(urlsInMarkDownFile)):
+                #     thread = Downloader(urlsInMarkDownFile[i], mediaTargetFolder)
+                #     thread.start()
+                #     threads.append(thread)
+            
+                replacements = {}
+                for thread in finishedThreads:
+                    # thread.join()
+                    # only if path has changed (othervise it has been skipped or deleted)
+                    if (thread.fileUrl != thread.finalFilePath):
+                        print ("saved %s as %s"% (thread.fileUrl, thread.finalFilePath))
+                        replacements[thread.fileUrl] = thread.finalFilePath
+
+                # make sure we dont use a temp filename that already exists
+                while True:
+                    markdownTempFilename = str(uuid.uuid4()) + ".md"
+                    if (not os.path.exists(markdownTempFilename)):
+                        break
+            
+                print ("saving new temporary markdownfile with replaced links as %s" % markdownTempFilename)
+                with open(markdownTempFilename, 'w') as fin:
+                    with open(markdownFilename, 'r') as ini:
+                        fin.write(replacemany(replacements, ini.read()))
+                
+                markdownFileTitle, markdownFileExt = os.path.splitext(markdownFilename)
+                # rename markdownTempFilename to markdownFilename-localMedia-X.md which does not exists
+                newMarkdownFilename = "%s-localMedia.md" % markdownFileTitle
+                newMarkdownFilenameIndex = 0
+                while (os.path.exists(newMarkdownFilename)):
+                    newMarkdownFilenameIndex += 1
+                    newMarkdownFilename = "%s-localMedia-%i.md" % (markdownFileTitle, newMarkdownFilenameIndex)
+
+                print ("rename temporary markdownfile %s as %s" % (markdownTempFilename, newMarkdownFilename))
+                os.rename(markdownTempFilename, newMarkdownFilename)
